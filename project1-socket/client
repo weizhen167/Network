@@ -1,8 +1,6 @@
 #!/usr/bin/python
 # client program
-#group zhenyao
 #zhen wei NUID:000598201
-#jue yao NUID: 001124079
 
 import socket
 import sys
