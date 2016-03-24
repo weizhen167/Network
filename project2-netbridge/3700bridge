@@ -1,7 +1,6 @@
 #!/usr/bin/python -u 
-# The -u makes output unbuffered, so it will show up immediately
 #Zhen Wei
-#Jue Yao
+
 import sys
 import socket
 import select
