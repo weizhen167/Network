@@ -1,0 +1,269 @@
+#!/usr/bin/python -u
+#
+# CS3700, Spring 2015
+# Project 2 Starter Code
+#
+import random
+import binascii
+import hashlib 
+import sys
+import socket
+import time
+import datetime
+import select
+import json
+
+#msg size
+MSG_SIZE = 1500
+#data size
+DATA_SIZE = 0
+#socket timeout
+TIMEOUT = 30
+#inner sequence of sender, not visible
+SEQUENCE = random.randint(1,99)
+#sockets list, only contains 1 socket, easy to read
+sockets = []
+#temporary data storage, use for resend
+POOL = ""
+#last send time
+LAST_SEND = 0 
+#what sequence shoud I recive next time
+ACC = 0
+#what is my current step of 
+STT = 1
+#visible sequence number
+adder = 0
+#connection is up or not
+online = False
+#a data cache
+datastore = ""
+#maxsize of data cache
+maxsize = 63500
+#predelete this lenth from data cache
+zsize = 0
+#RTO
+RTO = 0.2
+#Congestion Window's size
+cwnd = 1000
+#resend time's counter
+dup = 0
+#resend time's size
+duptime = 1
+#try to test drop of the network,to decide duptime
+lossrate = 1
+loss1 = 1
+loss2 = 0
+
+
+# Bind to localhost and an ephemeral port
+IP_PORT = sys.argv[1]
+UDP_IP = IP_PORT[0:IP_PORT.find(":")]
+UDP_PORT = int(IP_PORT[IP_PORT.find(":")+1:])
+dest = (UDP_IP, UDP_PORT)
+
+# Set up the socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+sock.settimeout(TIMEOUT)
+sockets.append(sock)
+
+#log method
+def log(string):
+    sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
+
+#send first packet with SYN
+def send_SYN():
+    global SEQUENCE
+    global LAST_SEND
+    global POOL
+    msg = json.dumps({"sequenceS": SEQUENCE, "sequenceR": 0, "flag": "SYN" ,"checksum": 0, "size": 1, "data": "syNNN","time" : time.time()})
+    log("[send SYN] <" + str(SEQUENCE) + ", " + str(0) + ">")
+    POOL = msg
+    LAST_SEND = time.time()
+    SEQUENCE += 1
+    if sock.sendto(msg, dest) < len(msg):
+            log("[error] unable to fully send packet")
+    return True
+
+#send next package
+def send_next_packet(pseqR):
+    global ACC
+    global SEQUENCE
+    global POOL
+    global LAST_SEND
+    global adder
+    global zsize 
+    data = datastore[0: cwnd]
+    if (len(data) > 0):
+        checksum = binascii.crc32(data)
+        msg = json.dumps({"sequenceS": SEQUENCE, "sequenceR": pseqR + 1, "flag": "ACK" ,"checksum": checksum, "size": len(data), "data": data})  
+        log("!!!!!!!!!!!!!!!!!!!!!!!!!!!check sum length is " + str(checksum))      
+        ACC = SEQUENCE + len(data)
+        POOL = msg
+        LAST_SEND = time.time()
+        if sock.sendto(msg, dest) < len(msg):
+            log("[error] unable to fully send packet")
+        else:
+            adder = adder + len(data)
+            zsize = len(data)  
+            log("[send data] " + str(adder) + " (" + str(len(data)) + ")")          
+        return True
+    else:
+        return False
+
+#send packege whith FIN flag
+def send_FIN(pseqR):
+    global SEQUENCE
+    global LAST_SEND
+    global POOL
+    msg = json.dumps({"sequenceS": SEQUENCE, "sequenceR": pseqR + 1, "flag": "FIN" ,"checksum": 0, "size": 1, "data": "Please sleep"})
+    log("[send FIN] <" + str(SEQUENCE) + ", " + str(pseqR + 1) + ">")
+    POOL = msg
+    LAST_SEND = time.time()
+    if sock.sendto(msg, dest) < len(msg):
+            log("[error] unable to fully send packet")
+    return True
+
+#send packets again
+def send_again():
+    global LAST_SEND
+    global POOL
+    global dup
+    global loss1
+    msg = POOL
+    decoded = json.loads(msg)
+    pflag = decoded['flag']
+    psize = decoded['size']
+    if pflag == "SYN":
+        decoded['time'] = time.time() 
+        msg = json.dumps(decoded)
+        loss1 = loss1 + 1
+    sock.sendto(msg, dest)
+    log("[send data] " + str(adder) + " (" + str(psize) + ")")
+    LAST_SEND = time.time()
+    return True
+
+# Send SYN
+send_SYN()
+
+#initialize local data storage
+DATA_SIZE = maxsize - len(datastore)
+datastore = datastore + sys.stdin.read(DATA_SIZE)
+
+# step1:read in data, send packets
+# end when there were nothing caould be send
+while (STT == 1):
+    
+    ready, ignore, ignore2 = select.select(sockets, [], [],0.0001)
+                
+    for x in ready:
+        result = sock.recvfrom(MSG_SIZE)
+        if result:
+            (data, addr) = result
+            try:
+                decoded = json.loads(data)
+                pseqS = decoded['sequenceS']
+                pseqR = decoded['sequenceR']
+                pflag = decoded['flag']
+                psize = decoded['size']
+                # when receive SYN 
+                if (pflag == "SYN"):
+                    #get drop rate
+                    loss2 = loss2 + 1
+                    lossrate = loss2/float(loss1)
+                    log("lossrate is " + str(lossrate)+ " " + str(loss1)+" "+str(loss2))
+                    log(str(online))
+                    #when the net work drop packets, increase resend times   
+                    if lossrate < 1:
+                        duptime = 1 + 1 / lossrate
+                    #if this is the first time receice SYN, set up connection, get RTO and start send data 
+                    if not online:
+                        pRTO = decoded['time']
+                        RTO = pRTO * 4
+                        log("[recv SYN] <" + str(pseqS) + ", " + str(pseqR) + "> , RTO is " + str(RTO))
+                        online = True
+                        log("connection setup scussifually")
+                        send_next_packet(pseqR)
+
+                #when recv the ACK and  this ACK is inorder 
+                if (pflag == "ACK" and pseqS == ACC):
+                    dup = 1
+                    log("[recv ACK ] " + str(psize))
+                    datastore = datastore[zsize:]
+                    cwnd = cwnd * 2
+                    SEQUENCE = ACC
+                    #log("data pool is " + str(len(datastore)))
+                    DATA_SIZE = maxsize - len(datastore)
+                    datastore = datastore + sys.stdin.read(DATA_SIZE)
+                    if(not send_next_packet(pseqR)):
+                        
+                        send_FIN(pseqR)
+                        STT = 2
+                        break
+
+            except (ValueError, KeyError, TypeError):
+                log("[recv corrupt packet]")
+                send_again()
+
+    #when the dup times is larger than the duptime value, I would like to resend my packets slower 80% than before, to avoid the traffic
+    if dup > duptime and online:
+        RTO = RTO * 1.8
+        #log("Now RTO is " + str(RTO))
+        dup = 0
+        if RTO > 7:
+            RTO = RTO / 2
+    # when now time - last sent is larger than RTO time, and I still get nothing back, I will resend it.
+    if time.time() - LAST_SEND > RTO:
+        send_again()
+        dup = dup + 1
+
+#decrease RTO
+RTO = RTO /4
+
+#step into step2, in this step, I would like to keep listing the FIN flag from reciver, IF I got FIN from recv, I would send FIN/ACK back, and then I go to step 3 
+while (STT == 2):
+    ready, ignore, ignore2 = select.select(sockets, [], [],0.0001)
+    if time.time() - LAST_SEND > RTO:
+            send_again()
+    for x in ready:
+        result = sock.recvfrom(MSG_SIZE)
+        if result:
+            (data, addr) = result
+            try:
+                decoded = json.loads(data)
+                pflag = decoded['flag']
+                pseqR = decoded['sequenceR']
+                if (pflag == "FIN"):
+                    log("[recv FIN] <" + str(pseqS) + ", " + str(pseqR) + ">")
+                    msg = json.dumps({"sequenceS": SEQUENCE, "sequenceR": pseqR + 1, "flag": "ACK" ,"checksum": 0, "size": 1, "data": "Please sleep"})
+                    POOL = msg
+                    sock.sendto(msg, dest)
+                    log("[send FIN ACK  ] <" + str(pseqS) + ", " + str(pseqR) + ">")
+                    LAST_SEND = time.time()
+                    STT = 3
+                    break                
+            except (ValueError, KeyError, TypeError):
+                log("[recv corrupt packet]")
+                send_again() 
+
+#in this step I would keep sending FIN/ACK. and if I didn't hear anything from recver for 1.5 s, this step is finish
+while (STT == 3):
+    ready, ignore, ignore2 = select.select(sockets, [], [], 0.0001)
+    if time.time() - LAST_SEND > 1.5:
+        break
+    for x in ready:
+        result = sock.recvfrom(MSG_SIZE)
+        if result:
+            (data, addr) = result
+            try:
+                decoded = json.loads(data)
+                pflag = decoded['flag']
+                if (pflag == "FIN"):
+                    send_again()
+            except (ValueError, KeyError, TypeError):
+                log("[recv corrupt packet]")
+                send_again()
+
+#Then I go sleep
+log("[completed]")
+sys.exit(0)
+

@@ -1,0 +1,287 @@
+#!/usr/bin/python -u 
+# The -u makes output unbuffered, so it will show up immediately
+#Zhen Wei
+#Jue Yao
+import sys
+import socket
+import select
+import json
+import time
+ 
+# pads the name with null bytes at the end
+def pad(name):
+        result = '\0' + name
+        while len(result) < 108:
+                result += '\0'
+        return result
+
+#broadcast to all host
+def bcast(message,sockets):
+        i = 0
+        while i < len(sockets):
+                sock = sockets[i]
+                sock.sendall(message);
+                i= i+1
+                        
+#broadcast to all undisable (designated) port              
+def bcastdesign(newmsg,disablelist,sockets):
+        i = 0
+        while i < len(sockets):
+                if i not in disablelist:
+                        sock = sockets[i]
+                        sock.sendall(newmsg)
+                        i = i +  1
+                else:
+                        i= i+1
+
+#find the given host in forading table and decide if i can forading mesage
+#through this port.
+#fwdtable entry format is: {host:[port,time]}
+def hostinfwdtable(host,fwdtable,nowtime,disablelist):
+        result = "XX"
+        hostlist = fwdtable.keys()
+        if str(host) in hostlist:
+                hostport = fwdtable[str(host)][0]
+                hostlifeyime = fwdtable[str(host)][1]
+                if nowtime - hostlifeyime < 5 and int(hostport) not in disablelist:
+                        result = int(hostport)
+        return result
+
+#set list, kill the duplicated elements
+def setlist(list1):
+        result = []
+        i = 0
+        while i < len(list1):
+                if list1[i] not in result:
+                       result.append(list1[i])
+                       i = i + 1
+                else:
+                        i = i + 1
+        return result    
+
+#print designatedlist method
+def printdesignatedlist(designatedlist1,disablelist):
+        result = []
+        i = 0
+        while i < len(designatedlist1):
+                porrt = designatedlist1[i]
+                if porrt not in disablelist:
+                        result.append(porrt)
+                        i = i + 1
+                else:
+			i = i + 1
+        return str(result)
+         
+#main method
+if __name__ == "__main__":
+        id = sys.argv[1]
+        LAN = list(set(sys.argv[2:]))
+        LAN = sorted(LAN)
+        sockets = []
+        #port list of this bridge str list
+        fwdtable = {}
+        #sleep time out = 0.5
+        SLEEP_TIMEOUT = 0.5
+        #root of this bridge
+        root = id
+        #decide which wave of message 
+        wave = 1
+        #root port of this bridge
+        rootport = ""
+        #path to root
+        path2root = 0
+        #disable port list
+        disablelist = []
+        #orginal designated port list
+        designatedlist1 = []
+        #timemark of BPDUs
+        timemark = time.time()
+        #last sent time of BPDUs, this olny for root
+        last_sent = time.time()
+        
+        qqwwqq = 0
+        # creates sockets and connects to them
+        for x in range(len(LAN)):                
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+                s.connect(pad(LAN[x]))
+                sockets.append(s)
+                designatedlist1.append(qqwwqq)
+                qqwwqq = qqwwqq + 1
+        print ("New root: " + root)
+        print ("Bridge " + id + " starting up\n")
+        #pack a new BPDU and tell everyone i'm the new bridge
+        newinfo = json.dumps({"source" : id, "dest" : "ffff", "type" : "bpdu","id": 0,"dis":path2root,"trans":id,"timeflag":last_sent});
+        #waiting for others setup 
+        time.sleep(0.2)
+        #broad cast my new info
+        bcast(newinfo,sockets)
+        
+        # Main loop
+        while True:
+                # Calls select with all the sockets; change the timeout value (1)
+                ready, ignore, ignore2 = select.select(sockets, [], [], 1)
+         
+                #I haven't received an BPDU msg for more than 1 sec, I need to find a new root
+                #initialize all of my infomation and boradcast a BPDU to every one 
+                if  time.time() -timemark > 1 and id != root:
+                        root = id
+                        path2root = 0
+                        print ("New root: " + id)
+                        disablelist = []
+                        fwdtable = {}
+                        wave = 1
+                        packet = json.dumps({"source" : id, "dest" : "ffff", "type" : "bpdu","id": 0,"dis":path2root,"trans":id,"timeflag":last_sent});
+                        bcast(packet,sockets)
+                        timemark = time.time()
+
+                # Reads from each of the ready sockets
+                for x in ready:
+                        #received data                      
+                        data = x.recv(1500)
+                        #decode the data
+                        decode = json.loads(data)
+                        #initialize message id
+                        msgid = 1.1
+                        #this message is from my which port
+                        port = sockets.index(x)
+                        #this message is arrives at nowtime
+                        nowtime = time.time()
+                        #print what I got this time
+                        print ("Recv on port " + str(port)+ ": " + data)
+
+                        #if I got a bpdu message and this message hasn't timeout yet
+                        if decode["type"] == "bpdu" and nowtime-decode["timeflag"] < 0.75:
+                                #update my time mark
+                                timemark = decode["timeflag"]
+                                #message id of this message
+                                msgid = decode["id"]
+                                #the source host of this message
+                                newroot = decode["source"]
+                                #the path to root of last node
+                                newpth = decode["dis"]
+                                #my path to root
+                                currpth = int(path2root)
+
+                                #if my id number is larger than the one of that bridge
+                                # set that bridge as my root
+                                if root > newroot:
+                                        root = newroot
+                                        path2root = decode["dis"]+1
+                                        disablelist.append(port)
+                                        print ("New root: " + newroot)
+                                        disablelist = [] 
+                                        fwdtable = {}
+                                        rootport = str(port)
+                                        disablelist.append(port)
+                                        print ("Root port: " + id+"/"+str(port))
+
+                                #if we have the same root
+                                if root == newroot:
+                                        #if my path to root is longer than the new one, I will change my root path
+                                        #and set my root port to this port
+                                        if path2root > newpth+1:
+                                                path2root = newpth+1
+                                                rootport = str(port)
+                                                print ("Root port: " + id+"/"+str(port))
+                                        #if the new path is equals my current, and this time it's from lower id port,
+                                        #set my root port to this port
+                                        if path2root == newpth+1 and int(port) < int(rootport):
+                                                rootport = str(port)
+                                                print ("Root port: " + id+"/"+str(port))
+                                        #if the new path is less than mine, then I need to disable this port.
+                                        if newpth < currpth:
+                                                disablelist.append(port)
+                                                disablelist = setlist(disablelist)
+                                                print 'Disabled port: '+str(id)+ "/"+str(port)
+                                                print 'Designated port: ' + id + "/" + printdesignatedlist(designatedlist1,disablelist)
+                                        # if we have the same path to root, and last node's id is smaller than mine,
+                                        # then disable this port.
+                                        if newpth == currpth:
+                                                newid = decode["trans"]
+                                                myid = id
+                                                if myid > newid:
+                                                        disablelist.append(port)
+                                                        disablelist = setlist(disablelist)
+                                                        print 'Disabled port: '+str(id)+ "/"+str(port)
+                                                        print 'Designated port: ' + id + "/" + printdesignatedlist(designatedlist1,disablelist)
+
+                                #if I'm not root, I need to pass BPDU to my next node                    
+                                if id != root:
+                                        decode["dis"] = newpth+1
+                                        decode["trans"] = str(id)
+                                        newmsg = json.dumps(decode)    
+                                        bcastdesign(newmsg,disablelist,sockets)
+                        
+                        # if I got a data message
+                        if decode["type"] == "data":
+                                #the message id
+                                msgid = decode["message"]["id"]
+                                #the destnation of this message
+                                datadest = decode["dest"]
+                                #the source of this message
+                                datasource = decode["source"]
+                                #the location of this message's destnation on the fwdtable
+                                destonport = hostinfwdtable(datadest,fwdtable,nowtime,disablelist)
+                                #the location of this message's source on the fwdtable
+                                sourceonport = hostinfwdtable(datasource,fwdtable,nowtime,disablelist)
+ 
+                                #add/update new source into the port list 
+                                if sourceonport != "XX":
+                                        fwdtable[datasource][0] = port
+                                        fwdtable[datasource][1] = nowtime
+                                if sourceonport == "XX":
+                                        fwdtable[datasource] = [0,0]
+                                        fwdtable[datasource][0] = port
+                                        fwdtable[datasource][1] = nowtime
+
+                                #processing data
+                                #if data des == datasource, not forwarding the message and drop the pachet
+                                if datadest == datasource:
+                                        print "Not forwarding message " + str(msgid)
+
+                                #if the desnation is not on my fwdtable
+                                if destonport == "XX":
+                                        #when i am not a root
+                                        if str(id) != str(root):
+                                                #and this data is from my root port,I will boradcast this message
+                                                #to all of my designed port
+                                                if int(port) == int(rootport):
+                                                        bcastdesign(data,disablelist,sockets)
+                                                        print "Broadcasting message " + str(msgid) + " to all designated ports"
+                                                #and this data is from my designed port, I will send this data to my root port
+                                                if int(port) not in disablelist:
+                                                        dest = sockets[int(rootport)]
+                                                        dest.sendall(data)
+                                                        print ("Forwarding message " + str(msgid) + " to port " + str(rootport))
+                                        #when I am the root, I will broadcast this message to all of my port
+                                        if str(id) == str(root):
+                                                bcast(data,sockets)
+                                                print "Broadcasting message " + str(msgid) + " to all ports"
+
+                                #if this desnation is on my list, and that port is not disabled, forwarding this message
+                                if destonport != "XX":
+                                        dest = sockets[int(destonport)]
+                                        dest.sendall(data)
+                                        print ("Forwarding message " + str(msgid) + " to port " + str(destonport))
+                     
+                #time to broadcast, I can only have a broadcast right when I am a root.
+                if (time.time() - last_sent > SLEEP_TIMEOUT) and id == root:
+                        i = 0
+                        last_sent = time.time()
+                        while i < len(sockets): 
+                                sock = sockets[i]
+                                packet = json.dumps({"source" : id, "dest" : "ffff", "type" : "bpdu","id": wave,"dis":path2root,"trans":id,"timeflag":last_sent});
+                                sock.sendall(packet)
+                                i= i+1
+                        wave = wave + 1
+
+
+                                
+
+  
+                                
+                                
+                
+
+
+

@@ -1,0 +1,177 @@
+#!/usr/bin/python -u
+#
+# CS3700, Spring 2015
+# Project 2 Starter Code
+#
+
+import sys
+import socket
+import time
+import datetime
+import select
+import json
+import random
+import binascii
+
+#MAX recv size 
+MSG_SIZE = 70000
+#time out time
+TIMEOUT = 30
+#the not visible sequence
+SEQUENCE = random.randint(1,99)
+#visible sequence number
+adder = 0
+#temporary data storage, use for resend
+POOL = ""
+#address of sender
+ADDRESS = ""
+#sockets list, only contains 1 socket, easy to read
+sockets = []
+#what is my current step of 
+STT = 1
+
+#log method
+def log(string):
+    sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
+
+# Bind to localhost and an ephemeral port
+UDP_IP = "127.0.0.1"
+UDP_PORT = 0
+
+# Set up the socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+sock.bind((UDP_IP, UDP_PORT))
+sock.settimeout(TIMEOUT)
+sockets.append(sock)
+
+# Get port we bound to
+UDP_PORT = sock.getsockname()[1]
+log("[bound] " + str(UDP_PORT))
+
+
+#detect the packet is correct.
+#check both SEQUENCE number and checksum of every packect
+def datacorrect(decoded):
+    pseqR = decoded['sequenceR']
+    pchecksum = decoded['checksum']
+    psize = decoded['size']
+    pdata = decoded['data']
+    if ((pseqR == SEQUENCE + 1) and (pchecksum == binascii.crc32(pdata))):
+        return True
+    else:
+        return False
+
+#send packets again
+def send_again(addr):
+    global POOL
+    msg = POOL
+    decoded = json.loads(msg)
+    pseqS = decoded['sequenceS']
+    pseqR = decoded['sequenceR']
+    pflag = decoded['flag']
+    sock.sendto(msg, addr)    
+    log('ABOUT TO SEND {"ACK": ' + str(adder) + "}")
+    return True
+
+#local time, use for calculate timeout
+localtime = time.time() + 9
+
+# Now listen for packets
+while STT == 1:
+    ready, ignore, ignore2 = select.select(sockets, [], [],0.0001)
+
+    # If nothing is ready, we hit the timeout
+    for x in ready:
+        result = sock.recvfrom(MSG_SIZE)
+        if result:
+            localtime = time.time()
+            (data, addr) = result
+            ADDRESS = addr
+            try:
+                decoded = json.loads(data)
+
+                #get every part of packet
+                pseqS = decoded['sequenceS']
+                pseqR = decoded['sequenceR']
+                pflag = decoded['flag']
+                pchecksum = decoded['checksum']
+                psize = decoded['size']
+                pdata = decoded['data']
+
+                #When I got a SYN flag, I will send back my sequence and accept the connection  
+                if (pflag == "SYN"):
+                    pRTO = decoded['time']
+                    log("[recv SYN] <" + str(pseqS) + ", " + str(pseqR) + ">")
+                    msg = json.dumps({"sequenceR": SEQUENCE,"sequenceS": pseqS + 1,  "flag": "SYN", "size": adder,"time" : time.time() - pRTO})
+                    POOL = msg
+                    log("[send SYN] <" + str(SEQUENCE) + ", " + str(pseqR) + ">")
+                    if (sock.sendto(msg, addr) < len(msg)):
+                        log("[error] unable to fully send packet")
+   
+                #when I got a datapack, but the data packet is wrong(maybe not in order, duplicate, corrupt) send my last ACK to sender again
+                if (pflag == "ACK" and not datacorrect(decoded)):
+                    send_again(addr)
+
+                #when i got a datapack and this packet is correct, I will send a ACK of this msg
+                if (pflag == "ACK" and datacorrect(decoded)):
+                    SEQUENCE += 1
+                    log("[recv data] " + str(adder) + " ("+str(psize)+") " + "ACCEPTED" + " (in-order)")
+                    sys.stdout.write(pdata)
+                    adder += psize
+                    msg = json.dumps({"sequenceR": SEQUENCE,"sequenceS": pseqS + len(pdata),  "flag": "ACK", "size": adder})
+                    POOL = msg
+                    log('ABOUT TO SEND {"ACK": ' + str(adder) + "}")
+                    if sock.sendto(msg, addr) < len(msg):
+                        log("[error] unable to fully send packet")   
+                
+                #When I got a FIN flag, I will send FIN flag back and finish this step and go to step 2
+                if (pflag == "FIN"):
+                    log("[recv FIN] <" + str(pseqS) + ", " + str(pseqR) + ">"+ " (" + pdata + ")")
+                    msg = json.dumps({"sequenceR": SEQUENCE + 1,"sequenceS": pseqS + len(data),  "flag": "FIN","size": adder + 1})
+                    POOL = msg
+                    log("[send FIN] <" + str(pseqS) + ", "+ str(pseqR) + ">")
+                    if sock.sendto(msg, addr) < len(msg):
+                        log("[error] unable to fully send packet")
+                    localtime = time.time()
+                    STT = 2
+                    break          
+            except (ValueError, KeyError, TypeError):
+                log("[recv corrupt packet]")
+                send_again(addr)
+
+    #if I'm timeout, I will send a FIN request to sender
+    if(time.time() - localtime > 9):
+        log("[error] timeout")
+        localtime = time.time()  
+        msg = json.dumps({"sequenceR": SEQUENCE + 1,"sequenceS": -999,  "flag": "FIN","size": adder + 1})
+        if sock.sendto(msg, addr) < len(msg):
+            log("[error] unable to fully send packet")
+
+#in this step, I would keep sending FIN flag, until I get the FIN/ACK flag from sender. 
+while STT == 2:    
+    ready, ignore, ignore2 = select.select(sockets, [], [],0.0001)
+    if time.time() - localtime > 0.1:
+        send_again(ADDRESS)
+        localtime = time.time()
+    for x in ready:
+        result = sock.recvfrom(MSG_SIZE)
+        if result:
+            (data, addr) = result
+            try:
+                decoded = json.loads(data)
+                pflag = decoded['flag']
+                if (pflag == "FIN"):
+                    send_again(ADDRESS)
+                if (pflag == "ACK"):
+                    log("[recv FIN ACK  ] <" + str(pseqS) + ", " + str(pseqR) + ">")
+                    STT = 3
+                    break
+            except (ValueError, KeyError, TypeError):
+                log("[recv corrupt packet]")
+                send_again()
+
+#Then I go sleep
+log("[completed]")
+sys.exit(0)
+                
+            

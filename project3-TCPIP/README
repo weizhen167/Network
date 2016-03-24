@@ -1,0 +1,21 @@
+Team: ZhenYao
+Member 1: Zhen Wei
+Member 2: Jue Yao
+Language : python 2.7
+
+approach:
+we did something like TCP Tahoe. first we set cwnd as 1000 Bytes. if this trans process pass in time, we set cwnd = cwnd * 2. If we resend a same package more than 3 times, this will cause a timeout. if time out, we decrease the resend frequency to 20% of Original. loop this until recver get all the data. In our approcah, cwnd has no limit, it would always twice larger than before. this is a bad design.     
+
+
+Test:
+we solved problem one by one. After analysis, we found that a transmation could fail because : 
+1.Trans speed too slow 
+2.packet drop
+3.packet damage
+so we solved Drop and damage first. Then we do the test, we found we still couldn't pass: 
+--0.1Mbps 10ms deley and large size.
+
+After analysis, we found that some of our resend logic shoud be changed. Then we optimize the resend rules. Then we found we could fail the test about 1/5 chance:
+--1Mbps 10ms deley and 50% drop with medium size.
+
+after analysis, we changed resend rules again. then we tried 100 times of tests, we passed 98% of these tests and we believe that 2% is a  3600tcp machine's local network problem, so we ignored that 2%.
