@@ -1,0 +1,453 @@
+#!/usr/bin/env python
+
+import sys, socket, select, time, json, random,datetime,copy
+# Your ID number
+my_id = sys.argv[1]
+
+# The ID numbers of all the other replicas
+replica_ids = sys.argv[2:]
+
+# Connect to the network. All messages to/from other replicas and clients will
+# occur over this socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(my_id)
+
+R_dep = 0.3 #timeout lower bound
+R_uper = 0.4 #timeout upper bound
+currenttimeout = random.uniform(R_dep, R_uper)#F or C timeout
+
+
+MyRole = "follower" 
+MyLeader = 'FFFF'
+Myvote = 0 #C state use only,counter of the vote, if my vote > half, I become a leader, 
+           #this also represnt how many follower do I have in this term
+
+Myterm = 0 #only C can modifiy term, +1 when a new term start
+Canvote = True #F use only, in this term, I can vote or not
+Ftimeout = time.time() #F use only, record the time of the most recent msg I got form L 
+Ctimeout = 0 #C use only, record the time of when I become the C in this term 
+lastsent = time.time() #L use only, record the time of My most recent broadcast
+log = {}    #forever log
+
+
+################################       
+#         State machine        # 
+################################
+myCurrentState = 0
+lastcommid = ""
+
+###########Leader##########
+#a snapshot of current log
+templog ={}
+#uncommited request append ack counter, L use only 
+#Key is MID, Value is number of append ack of this mid
+#format{'MID1':int,'MID2':int,...}
+uncomitlist_L = {}
+#uncommited request detail, L use only 
+#Key is MID, Value is a list contains[current snapshot,src of this request]
+#format{'MID1':[snapshot,src],'MID2':[snapshot,src],...}
+uncomitdir_L = {}
+#uncommited request order, L use only
+#always append new MID into this list
+#format[MID1,MID2,MID3,.....]
+commitorder_L = []
+
+###########Follower##########
+#uncommited request order, F use only
+#always append new MID into this list
+#format[MID1,MID2,MID3,.....]
+uncomitlist_F = []
+#uncommited request detail, L use only 
+#Key is MID, Value is a list contains[current snapshot,src of this request]
+#format{'MID1':[snapshot,src],'MID2':[snapshot,src],...}
+uncomitdir_F = {}
+
+################################       
+#       show program log       # 
+################################
+
+#show log
+def logttt(string):
+    sys.stderr.write('['+my_id+']'+' ['+ datetime.datetime.now().strftime("%H:%M:%S.%f") + '] ' + string + "\n")
+    #print('['+my_id+']'+' ['+ datetime.datetime.now().strftime("%H:%M:%S.%f") + '] ' + string )
+
+
+################################       
+#        heartbeat part        #
+################################
+'''
+L =leader
+F = follower
+C = candidate
+O = others
+
+heartbeat code |from|   |To |
+#1 append      |  L |-> | F |
+#2 append ok   |  F |-> | L |
+#3 commit      |  L |-> | F |
+#4 chooseme    |  C |-> | O |
+#5 vote you    |  F |-> | C |
+#6 append None |  L |-> | F |
+'''
+def send_heartbeat(dst,log,code,mid,src):
+    global my_id,MyLeader,Myterm,myCurrentState
+    msg = json.dumps({'src': my_id,
+                      'dst': dst,
+                      'leader': MyLeader,
+                      'type': 'heartbeat',
+                      'term': Myterm,
+                      'version':myCurrentState,
+                      'entry':log,
+                      'code':code,
+                      'MID':mid,
+                      'org':src})
+    sock.send(msg + '\n')
+    return True
+
+#hb cond 1,i"m a Leader got a new put request,first I store the put request into my statemachine, 
+#and then send broadcast append msg to the Follower   
+def sendappend(msg):
+    global lastsent,templog,uncomitlist_L,uncomitdir_L,commitorder_L
+    src = msg['src']
+    key = msg['key']
+    value = msg['value']
+    mid = msg['MID']
+    templog[key] = value
+    cp = copy.deepcopy(templog)
+    uncomitlist_L[mid] = 0
+    uncomitdir_L[mid] = [cp,src]
+    commitorder_L.append(mid)
+    if send_heartbeat('FFFF',cp,1,mid,src):
+        lastsent = time.time()
+  
+#hb cond 2, I'm a Follower, recived append request from the Leader,
+#I put it in my state machine, and send append ack back to the Leader.
+def logdata(msg):
+    global Ftimeout,uncomitlist_F,uncomitdir_F
+    mid = msg['MID']
+    tlog = msg['entry']
+    org = msg['org']
+    if mid not in uncomitlist_F:
+        uncomitlist_F.append(mid)
+        uncomitdir_F[mid]=[tlog,org]
+        if send_heartbeat(msg['src'],'',2,mid,""):
+            Ftimeout = time.time()
+
+#hb cond 3,I'm Leader I got the append ACK from Follower, I make uncomitlist_L[MID]+1, if uncomitlist_L[MID] > half
+# then I commit it from my statemachine to the log. After log success, send a put ok msg to client and commit state to Follwer. 
+def commitdata_L(msg):
+    global log,myCurrentState,uncomitlist_L,uncomitdir_L,lastcommid
+    mid = msg['MID']
+    if mid in commitorder_L:
+        uncomitlist_L[mid] += 1
+        if uncomitlist_L[mid] >= 2:
+            index = commitorder_L.index(mid)
+            i = 0
+            while i <= index:
+                if i == index:
+                    lm = copy.deepcopy(commitorder_L[0])
+                    l1 = uncomitdir_L[lm]
+                    tlog = l1[0]
+                    src = l1[1]
+                    log = tlog
+                    send_put_response(src,lm)
+                    lastcommid = lm
+                    if send_heartbeat('FFFF',copy.deepcopy(log),3,lm,''):
+                        lastsent = time.time()
+                    del commitorder_L[0]
+                    del uncomitlist_L[lm]
+                    del uncomitdir_L[lm]
+                    myCurrentState += 1
+                    
+                if i < index:
+                    lm = copy.deepcopy(commitorder_L[0])
+                    l1 = uncomitdir_L[lm]
+                    src = l1[1]
+                    send_put_response(src,lm)                
+                    del commitorder_L[0]
+                    del uncomitlist_L[lm]
+                    del uncomitdir_L[lm]
+                    myCurrentState += 1
+                i += 1
+
+#I'm Follwer, I got the commit from Leader, then I commit the state with this MID from my statemachine to the log. 
+def commitdata_F(msg):
+    global log, myCurrentState,uncomitlist_F,uncomitdir_F,lastcommid,Ftimeout
+    mid = msg['MID']
+    if mid not in uncomitlist_F:
+        log = msg['entry']
+        lastcommid = mid
+        myCurrentState = msg['version']
+        Ftimeout = time.time()
+    if mid in uncomitlist_F:
+        log = uncomitdir_F[mid][0]
+        myCurrentState += 1       
+        index = uncomitlist_F.index(mid)
+        i = 0
+        lastcommid = mid
+        while i <= index:
+	    lm = copy.deepcopy(uncomitlist_F[0])
+            myCurrentState += 1
+            del uncomitlist_F[0]
+            del uncomitdir_F[lm]       
+            i += 1
+        Ftimeout = time.time()
+            
+#hb cond 4 
+#I'm candidate, I start my election on this term
+def startmyelection():
+    global Ctimeout
+    become_candidate()
+    if send_heartbeat('FFFF','',4,'',''):
+        Ctimeout = time.time()
+
+#hb cond 5
+#i'm follower,I decide to vote the msg src.
+def votehim(msg):
+    global Ftimeout,MyLeader,Canvote
+    if send_heartbeat(msg['src'],'',5,'',''):
+        Ftimeout = time.time()
+        Canvote = False
+    
+#hb cond 6 edit log
+#i'm Leader, I send heartbeat to all of my follower, avoid new election and tell them my state   
+def sendnohb():
+    global lastsent,lastcommid
+    if send_heartbeat('FFFF',copy.deepcopy(log),3,lastcommid,''):
+        lastsent = time.time()
+
+#i'm Leader, resend the whole log, if my follower lost a lot
+#never use it in this project
+def replacelog(msg):
+    global log,myCurrentState,Ftimeout,MyLeader
+    if msg['src'] != MyLeader:
+        MyLeader = msg['src']
+    if msg['src'] == MyLeader:
+        log = msg['entry']
+        myCurrentState = msg['version']
+        
+        Ftimeout = time.time()
+
+###########################        
+#      msg to client      #
+###########################
+def send_get_response(msg):  
+    global MyLeader,my_id
+    kk = msg['key']
+    try:
+        v = log[kk]
+    except:
+        return False
+    msg = json.dumps({"src": my_id, "dst": msg['src'], "leader": MyLeader, "type": "ok", "MID": msg['MID'], "value":v})
+    sock.send(msg + '\n')
+    return True
+
+def send_redirect_response(msg):
+    global MyLeader,my_id
+    msg = json.dumps({"src": my_id, "dst": msg['src'], "leader": MyLeader, "type": "redirect","MID": msg['MID']})
+    sock.send(msg + '\n')
+    return True
+
+def send_put_response(src,mid):
+    global MyLeader,my_id
+    msg = json.dumps({"src": my_id, "dst": src, "leader": MyLeader, "type": "ok", "MID": mid})
+    sock.send(msg + '\n')    
+    return True
+
+def send_fail_response(src,mid):
+    global MyLeader,my_id
+    msg = json.dumps({"src": my_id, "dst": src, "leader": MyLeader,"type": 'fail', "MID": mid})
+    sock.send(msg + '\n')
+    return True
+
+
+###########################        
+#       process msg       #
+###########################   
+def process_msg(msg):
+    mtype = msg['type']
+    if mtype == "put":
+        process_put(msg)
+    if mtype == "get":
+        process_get(msg)
+    if mtype == "heartbeat":
+        process_heartbeat(msg)
+
+def process_put(msg):
+    if MyRole == "leader":
+        sendappend(msg)
+    if MyRole in {"follower","candidate"}:
+        send_redirect_response(msg)
+        
+def process_get(msg):
+    if MyRole == "leader":
+        send_get_response(msg)
+    if MyRole in {"follower","candidate"}:
+        send_redirect_response(msg)
+        
+def process_heartbeat(msg):
+    if MyRole == "leader":
+        p_heartbeat_L(msg)
+    if MyRole == "follower":
+        p_heartbeat_F(msg)
+    if MyRole == "candidate":
+        p_heartbeat_C(msg)
+
+
+###########################        
+#       Role change       #
+########################### 
+
+#My Role from any role -> follower
+def become_follower(msg):
+    global MyRole,Myterm,currenttimeout,Ftimeout,Canvote
+    Myterm = msg['term'] 
+    MyRole = "follower"  
+    currenttimeout = random.uniform(R_dep, R_uper)
+    Ftimeout = time.time()
+    MyLeader = 'FFFF'
+    Canvote = True
+
+#My Role from follower -> candidate
+def become_candidate():
+    global MyRole,Myvote,Myterm,currenttimeout,MyLeader  
+    MyRole = "candidate"
+    Myvote = 0
+    Myterm += 1
+    MyLeader = 'FFFF'
+    currenttimeout = random.uniform(R_dep, R_uper)
+
+#My Role from candidate -> leader, if I still have uncommited MID, I need to recommit it first, then I become leader.
+def become_leader():
+    global MyRole,MyLeader,templog,uncomitlist_F,uncomitlist_L,uncomitdir_L,commitorder_L
+    MyRole = "leader"
+    MyLeader = my_id
+    uncomitlist_L = {}
+    uncomitdir_L = {}
+    commitorder_L = []
+    if len(uncomitlist_F) > 0:
+        recommit()
+    else:
+        sendnohb()
+    templog = copy.deepcopy(log)
+    
+#the recommit process. 
+def recommit():
+    global uncomitlist_F,uncomitdir_F,log,myCurrentState,lastsent,uncomitlist_L,uncomitdir_L,commitorder_L
+    for mid in uncomitlist_F: 
+        l1 = uncomitdir_F[mid]
+        cp = l1[0]
+        src = l1[1] 
+        log = copy.deepcopy(cp)
+        myCurrentState += 1       
+        send_heartbeat('FFFF',copy.deepcopy(log),3,mid,'')
+        send_heartbeat('FFFF',copy.deepcopy(log),3,mid,'')
+        if send_heartbeat('FFFF',copy.deepcopy(log),3,mid,''):
+            lastsent = time.time()             
+    uncomitlist_F = []
+    uncomitdir_F = {}
+
+
+###########################        
+#    process heartbeat    #
+########################### 
+
+#any time, whatever what is my role, when I got a heartbeat, and this heartbeat term is larger than mine,
+#I become a follower.
+
+#as a leader, in my term, I only process heartbeat cond: 2,5
+#cond 2: my follower appended a new entry
+#cond 5: I have a new follower  
+def p_heartbeat_L(msg):
+    global Myvote
+    if msg['term']>Myterm:
+        become_follower(msg)
+        p_heartbeat_F(msg)
+        return None
+    if msg['term']==Myterm:
+        code = msg['code']
+        if code in {1,3,4,6}:
+            return None
+        if code == 2:
+            commitdata_L(msg)        
+        if code == 5:
+            Myvote += 1
+
+#as a follower, in my term, I only process heartbeat cond: 1,3,4 
+#cond 1: I need to appended a new entry
+#cond 3: I need to commit a entry
+#cond 4: I need to decide should I vote the msg['src'] guy
+#        If the guy's state < mine, i won't chooes him
+#        If the guy's state >= mine, i would like to chooes him
+def p_heartbeat_F(msg):
+    global MyLeader
+    if msg['term']>Myterm:        
+        become_follower(msg)
+    if msg['term']==Myterm:
+        if msg['src'] != MyLeader:
+            MyLeader = msg['src'] 
+        code = msg['code']
+        if code in {2,5,6}:
+            return None
+        if code == 1:
+            logdata(msg)
+        if code == 3:
+            commitdata_F(msg)
+        if code == 4:  
+            if myCurrentState <= msg['version'] and Canvote:    
+                votehim(msg)
+
+#as a candidate, in my term, I only process heartbeat cond: 4,5
+#cond 4: some one else start an election at my term? no way!!!
+#cond 5: did they vote me?? if yes, my vote + 1
+def p_heartbeat_C(msg):
+    global Myvote
+    if msg['term']>Myterm:
+        become_follower(msg)
+        p_heartbeat_F(msg)
+        return True
+    if msg['term']==Myterm:
+        code = msg['code']
+        if code in {1,2,3,6}:
+            become_follower(msg)
+            p_heartbeat_F(msg)
+        if code == 4:
+            return None
+        if code == 5:
+            if msg['leader'] == my_id:
+                Myvote += 1
+                if Myvote >= 2:
+                    become_leader()
+ 
+###########################        
+#    process main loop    #
+###########################          
+           
+# the mainloop       
+def mainloop():
+    global Ftimeout,Ctimeout,lastsent,currenttimeout,MyRole
+    while 1:
+        ready = select.select([sock], [], [], 0.01)[0]
+        if sock in ready:
+	    raw = sock.recv(60000)
+	    for msg_raw in raw.split('\n'):  
+		if len(msg_raw) == 0: continue	
+            	msg = json.loads(msg_raw)
+                process_msg(msg)
+        #as a follower, if I timeout, I need to become a candidate and start my election                                   
+        if MyRole == "follower" and time.time() - Ftimeout > currenttimeout:
+            startmyelection()
+        #as a candidate, if I timeout, I need to start a new election
+        if MyRole == "candidate" and time.time() - Ctimeout > currenttimeout:
+            startmyelection()
+        #as a leader, if my lastsent happened too long ago, I tell them I still alive
+        if MyRole == "leader" and time.time()-lastsent > 0.1:
+            sendnohb()
+
+if __name__ == "__main__":
+    mainloop() 
+
+
+
+
+            

@@ -1,0 +1,121 @@
+Project5 RAFT
+
+Group: zhenyao
+
+members: Zhen wei,Jue yao
+
+Language: Python
+Libraries: sys, socket, select, time, json, random,datetime,copy
+
+challenges:
+
+1. election. we did a lot of election test. finally we find the best way to do this.
+2. whole structure. we paied a lot of time on the structure design to make the code looks elegant and simple
+3. state machine design. 
+4. how to resend
+
+
+approach:
+
+
+
+**********
+election:*
+**********
+1.start up, everyone is follower. if a follower timeout, this follower become candidate and then term +1,start new election
+2.if a candidate got more than half vote, it become a leader. then it will keep sending hearbeats to tell it's follower he still alive
+3. if 2 candidate election in one term, none of them will win, both of them will timeout and term +1 ,then start a new election
+
+**********************
+how to process a put:*
+**********************
+1. if Leader got a new put request,first it will store the put request into it's statemachine, 
+and then broadcast append msg to the Follower
+2. when the follower got the append request,the follower will put it into the state machine, and send append ack back to the Leader.
+3. when the leader got an append ACK from Follower, the leader will record the ack times of this mid. if there are more than legal number of ack of this mid, 
+then the leader will commit it from the statemachine to the forever log. After log success, send a put ok msg to client and commit state to Follwer. 
+
+**********************
+how to process a get:*
+**********************
+1. if Leader got a new get request,it will find he key from the forever log. 
+if the request key is in the forever log:
+    send a get ok msg to client 
+if the request key is not in the forever log:
+    send a fail msg to client 
+
+********************
+how to Role change:*
+********************
+if a follower timeout, it will become a candidate.
+if a candidate timeout, it will become a candidate.
+if a candidate win the election, it will become a leader.
+any time, whatever what role is, when a node got a heartbeat, and this heartbeat term is larger 
+    than this node's current state,this node must become a follower.
+
+
+*************************
+State machine structure:*
+*************************
+Statemachine of leader:
+myCurrentState: my Current State
+lastcommid    : last commited entry's MID
+templog       : a snapshot of current log
+
+uncomitlist_L : #uncommited request append ack counter, L use only 
+                #Key is MID, Value is number of append ack of this mid
+                #format{'MID1':int,'MID2':int,...}
+
+uncomitdir_L  : #uncommited request detail, L use only 
+                #Key is MID, Value is a list contains[current snapshot,src of this request]
+                #format{'MID1':[snapshot,src],'MID2':[snapshot,src],...}
+
+commitorder_L : #uncommited request order, L use only
+                #always append new MID into this list
+                #format[MID1,MID2,MID3,.....]
+
+Statemachine of follower:
+myCurrentState: my Current State
+lastcommid    : last commited entry's MID
+
+uncomitlist_F : #uncommited request order, F use only
+                #always append new MID into this list
+                #format[MID1,MID2,MID3,.....]
+uncomitdir_F  : #uncommited request detail, L use only 
+                #Key is MID, Value is a list contains[current snapshot,src of this request]
+                #format{'MID1':[snapshot,src],'MID2':[snapshot,src],...}
+
+*****************************
+how the State machine works:*
+*****************************
+  when a put request comming from client, it would be append into a temporarily log of leader, then give this temporarily a snapshot.
+leader would store this snapshot and this request mid,src into the leader's state machine.
+  when a append request comming from leader, follower would store this snapshot and this request mid,src into the follower's state machine.
+
+if a follower become a leader, it would commit all of uncommited entry of the state machine to the forever log, and then set temporarily log as copy of forever log
+
+
+*************
+how to Sync:*
+*************
+leader never roll back
+leader's state always >= follower's state
+if Leader get any of uncommited MID appendACK more than legal times, leader could commit the log belongs to this MID's entry.
+when a new MID become a new state, the log of this MID would always cover the old one 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
