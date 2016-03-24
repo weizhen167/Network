@@ -1,0 +1,92 @@
+#!/usr/bin/python
+# client program
+#group zhenyao
+#zhen wei NUID:000598201
+#jue yao NUID: 001124079
+
+import socket
+import sys
+
+HOST = ''                     # The host
+PORT = 27993                  # The default port
+NUID = ''                     # the NUID
+SSL = False                   # SSL connect?
+result = ""                   # local value
+data = ""                     # local value
+
+#helper to get result
+def helper(i1, i2, op):
+    result = 0;
+    if(op == bytes("+")):
+        result = i1 + i2
+    if(op == bytes("-")):
+        result = i1 - i2
+    if(op == bytes("*")):
+        result = i1 * i2
+    if(op == bytes("/")):
+        result = int(i1 / i2)
+    return str(result);
+
+#client class
+def client(argv):
+    try:
+
+#identify command line 
+        if(len(argv) == 6):
+            PORT = int(argv[2])
+            HOST = argv[4]
+            NUID = argv[5]
+            if(argv[3] == "-s"):
+                SSL = True
+                print('SSL Open');
+        if(len(argv) == 5):
+            PORT = int(argv[2])
+            HOST = argv[3]
+            NUID = argv[4]
+        if(len(argv) == 4):
+            PORT = 27993
+            HOST = argv[2]
+            NUID = argv[3]
+            if(argv[1] == "-s"):
+                SSL = True
+                print('SSL Open');
+        if(len(argv) == 3):
+            PORT = 27993
+            HOST = argv[1]
+            NUID = argv[2]
+
+        #set up a socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((HOST, PORT))
+        s.sendall(bytes("cs3700fall2015 HELLO ")+ bytes(NUID) + bytes("\n"))
+        print('user say:', bytes("cs3700fall2015 HELLO ")
+          +bytes(NUID) + bytes("\n"))
+        data = s.recv(1024)
+        print ('Server say:', data)
+
+        #loop
+        while bytes("BYE") not in data:
+            number1 = int(data.split()[2])
+            number2 = int(data.split()[4])
+            operator = data.split()[3]
+            result = helper(number1,number2,operator);
+            s.sendall(bytes("cs3700fall2015 ")+
+                      bytes(str(result)) + bytes("\n"))
+            print ('user say:', bytes("cs3700fall2015 ")+
+                   bytes(result) + bytes("\n"))
+            data = s.recv(1024)
+            print ('Server say:', data)
+        
+        s.close()
+    
+    #catch exception    
+    except BaseException:
+        print ("please follow the Syntax: $ ./client <-p port> <-s> [hostname] [NEU ID]");
+    #no exception
+    else:
+        print ("done");
+
+#main class
+if __name__ == '__main__':
+        client(sys.argv);
+

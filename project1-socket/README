@@ -1,0 +1,10 @@
+cs3700 project 1
+
+group: zhenyao
+member1: zhen wei NUID:000598201
+member2: jue yao NUID:001124079
+
+use following Command Line Syntax:
+
+$ ./client <-p port> <-s> [hostname] [NEU ID]
+
