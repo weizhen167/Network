@@ -1,0 +1,47 @@
+Project4 Web Crawler
+
+Group: zhenyao
+
+members: Zhen wei,Jue yao
+
+Fakebook account: 
+zhen wei: 000598201 MVZ837MC
+Jue yao:  001124079 OTIG9ID2
+
+Language: Python
+Libraries: sys, socket, time
+
+challenges:
+
+we faced 2 challenges during this project.
+
+1. the cookie format. We tried a lot of cookie format to match the login form.
+2. chunked message. The end line of chunked message is really annoying,
+we choose to create a socket when we try to send the message,
+and close this socket when we received responds
+3. VPN. some times we got alot of 400 error wen we use vpn out of campus, 
+this would cause we can not getting the web addresses that on these bad 
+pages. So there was possible that we lost some of keys pages. But, it's 
+rearely happend on the ccis machine. so we tink that's because the bad VPN,not our code.
+
+
+high-level approach:
+
+while the visitorder:
+  send a GET request from visitorder[0]
+  when we recv a new message:
+  1. split message into 2 parts (header and body)
+  2. parse header, record status codes and new location(if 300)
+  3. parse body:
+    a. if 200, put current link into visited and put all not recorded link into visitorder list.
+        <1> if a key in this page, record this key.
+        <2> if we got 5 keys, exit
+    b. if 300, put current link into visited and put new location into visitorder list.
+    c. if 400, do nothing
+    d. if 500, put current link into visitorder list
+
+keep loop while the visitorder is not empty, until we got 5 keys.
+
+parse approach:
+  when we recv a new message, we keep tracking "<a herf =" in this message 
+  and record the text between "<a herf =" and "a/ >". 

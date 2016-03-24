@@ -1,0 +1,211 @@
+#!/usr/bin/python -u
+import socket   #for sockets
+import sys  #for exit
+import time
+
+host = "fring.ccs.neu.edu"
+login = "/accounts/login/?next=%2Ffakebook%2F"
+root = "/accounts/login/"
+visited = set()
+visitorder = []
+flags = set()
+session = ""
+csrf =  ""
+cookie = ""
+online = False
+start = time.time()
+
+#make cookies & store cookies
+def mkcookie(reply):
+    global session
+    global csrf
+    global cookie
+    if "csrftoken=" in reply and "sessionid=" in reply:
+        csrffrom = reply.find("csrftoken=") + 10
+        csrf = reply[csrffrom:csrffrom+32]
+        sessionfrom = reply.find("sessionid=") + 10
+        session = reply[sessionfrom:sessionfrom+32]
+    if "csrftoken=" not in reply and "sessionid=" in reply:
+        sessionfrom = reply.find("sessionid=") + 10
+        session = reply[sessionfrom:sessionfrom+32]
+    cookie = 'csrftoken=' +csrf+';'+ 'sessionid='+session+';'
+
+#make headers
+def mkheader(headers):
+    result = ""
+    for (k, v) in headers.items():
+        result = result + str(k) + ":" + str(v) + "\r\n"
+    return result
+
+#send message
+def sendmsg(order,link, headers,data):
+    msg = mkmsg(order,link, headers,data)
+    reply = sendmsg0(msg)
+    head0, body = splithead(reply)
+    head = parse_header(head0)
+    return head,body,link
+
+#make message
+def mkmsg(order,link, headers,data):
+    part1 = order + " " + link + " " + "HTTP/1.1\r\n"
+    part2 = mkheader(headers)
+    part3 = "\r\n"
+    if order == "GET":
+        return (part1 + part2+part3)
+    if order == "POST":
+        return (part1 + part2+"\n" + data)
+
+#send message helper
+def sendmsg0(message):
+    s = opensocket()
+    try :
+        s.sendall(message)
+    except socket.error:
+        print 'Send failed'
+        sys.exit()
+    reply = s.recv(4096)
+    #print reply
+    closesocket(s)
+    return reply
+
+def splithead(reply):
+    result = reply.split('\r\n\r\n', 1)
+    h = result[0]
+    mkcookie(h)
+    try:
+        b = result[1]
+    except IndexError:
+        #if 400 error, drop the body
+        b = ""
+    return h ,b
+
+def parse_200(input):
+    global visitorder
+    if "<h2 class='secret_flag' style=" in input:
+        secretstart = input.find("<h2 class='secret_flag' style=")+48
+        flag = input[secretstart:secretstart+64]
+        flags.add(flag)
+        sys.stdout.flush()
+        if len(flags) == 5:
+            t = int(time.time()-start)
+            p = len(visited)
+            print "\n\ncomplete! \ncost "+ str(t) + " second"
+            print str(p)+" pages wached"
+            print "result is: \n" + str(flags)
+            sys.exit()
+    if '<a href="' in input:
+        tempinput = input
+        while '<a href="' in tempinput:
+            taga = tempinput.find('<a href="')+9
+            tempinput = tempinput[taga:]
+            t2 = tempinput.find('">')
+            url = tempinput[0:t2]
+            tempinput = tempinput[t2:]
+            if(urlisvalid(url)):
+                visitorder.append(url)
+    return True
+
+def parse_300(header):
+    global visitorder
+    newadd = header['Location']
+    if newadd not in visited:
+        visitorder.append(newadd)
+    return True
+
+#parse page
+def parse(header,body,path):
+    global visitorder
+    global visited
+    global online
+    statecode = header['statecode']
+    if statecode == "200":
+        visited.add(path)
+        parse_200(body)
+    if statecode == "301" or statecode == "302":
+        visited.add(path)
+        if not online:
+            print "\nLogin Successfully!!!\n"
+            online = True
+        parse_300(header)
+    if statecode == "500":
+        visitorder.append(path)
+        return True
+
+def parse_header(input):
+    header = {}
+    for line in input.split("\r\n"):
+        line = line.split(': ',1)
+        if len(line) == 2:
+            header[line[0]] = line[1]
+        else:
+            header['statecode'] = line[0].split(' ')[1]
+    return header
+
+def opensocket():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect((host,80))
+    except socket.error:
+        print 'Failed to create socket'
+        sys.exit()
+    return s
+
+def closesocket(s):
+    s.close()
+
+def urlisvalid(input):
+    if input in visited or input in visitorder:
+        return False
+    elif "." in input:
+        if host not in input:
+            visited.add(input)
+            return False
+    return True
+
+def main(username,password):
+    global start
+    lhead = ""
+    lbody = ""
+    lpath = ""
+    headers = {"Host": host,
+           "Connection": "Keep-Alive"}
+    sendmsg("GET",login, headers,"")
+
+    logindata = "username="+username+"&password="+password+"&csrfmiddlewaretoken="+str(csrf)+ "&next=/fakebook/"
+    headers = {"Host": "fring.ccs.neu.edu",
+           "Cookie" : cookie,
+           "Content-Length":len(logindata),
+           "Content-Type":"application/x-www-form-urlencoded"}
+    lhead,lbody,lpath = sendmsg("POST",root, headers,logindata)
+    parse(lhead,lbody,lpath)
+
+    lo = 0
+    while len(visitorder) > 0:
+        sys.stdout.flush()
+        lo += 1
+        l1 = lo/200
+        sys.stdout.write("Processing: [%s%s] %i%%\r" % ('#' * l1 , '-' * (50 - l1) , l1 * 2))
+        path = visitorder[0]
+        if path in visited:
+            del visitorder[0]
+            continue
+        headers = {"Host": host,
+                   "Connection": "Keep-Alive",
+                   "Cookie" : cookie}
+        del visitorder[0]
+        lhead,lbody,lpath = sendmsg("GET",path, headers,"")
+        if(parse(lhead,lbody,lpath)):
+            continue
+    end = (time.time() - start)
+    if end < 5:
+        print "login failed!!!"
+        sys.exit(1)
+    print "the time cost is : " + str(int(end)) + "second"
+    print "Mission failed, flags: " + str(flags)
+
+if __name__ == "__main__":
+    Username = sys.argv[1]
+    Password = sys.argv[2]
+    main(Username,Password)
+
