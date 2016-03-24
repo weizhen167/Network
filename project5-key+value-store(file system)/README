@@ -1,8 +1,6 @@
 Project5 RAFT
 
-Group: zhenyao
-
-members: Zhen wei,Jue yao
+Zhen wei
 
 Language: Python
 Libraries: sys, socket, select, time, json, random,datetime,copy
